@@ -35,17 +35,122 @@ class StravaHeatmapGenerator:
         else:
             return self.default_center
     
+    def _calculate_activity_density_center(self, activities_data: List[Dict], grid_size: int = 50) -> Tuple[float, float]:
+        """Calculate the center point based on activity density using a grid-based approach"""
+        all_coords = []
+        
+        # Collect all coordinates
+        for activity in activities_data:
+            coords = activity.get('coordinates', [])
+            for coord in coords:
+                if len(coord) == 2:
+                    all_coords.append([coord[0], coord[1]])
+        
+        if not all_coords:
+            return self.default_center
+        
+        # Convert to numpy array for easier manipulation
+        coords_array = np.array(all_coords)
+        
+        # Get bounds
+        min_lat, max_lat = coords_array[:, 0].min(), coords_array[:, 0].max()
+        min_lon, max_lon = coords_array[:, 1].min(), coords_array[:, 1].max()
+        
+        # Create grid
+        lat_bins = np.linspace(min_lat, max_lat, grid_size)
+        lon_bins = np.linspace(min_lon, max_lon, grid_size)
+        
+        # Calculate 2D histogram (density grid)
+        density_grid, _, _ = np.histogram2d(coords_array[:, 0], coords_array[:, 1], 
+                                          bins=[lat_bins, lon_bins])
+        
+        # Find the grid cell with maximum density
+        max_density_idx = np.unravel_index(np.argmax(density_grid), density_grid.shape)
+        
+        # Get the center of the highest density grid cell
+        center_lat = (lat_bins[max_density_idx[0]] + lat_bins[max_density_idx[0] + 1]) / 2
+        center_lon = (lon_bins[max_density_idx[1]] + lon_bins[max_density_idx[1] + 1]) / 2
+        
+        return [center_lat, center_lon]
+    
+    def _calculate_optimal_zoom(self, activities_data: List[Dict]) -> int:
+        """Calculate optimal zoom level based on activity spread"""
+        all_lats = []
+        all_lons = []
+        
+        for activity in activities_data:
+            coords = activity.get('coordinates', [])
+            for coord in coords:
+                if len(coord) == 2:
+                    all_lats.append(coord[0])
+                    all_lons.append(coord[1])
+        
+        if not all_lats or not all_lons:
+            return self.default_zoom
+        
+        # Calculate the span of coordinates
+        lat_span = max(all_lats) - min(all_lats)
+        lon_span = max(all_lons) - min(all_lons)
+        
+        # Use the larger span to determine zoom
+        max_span = max(lat_span, lon_span)
+        
+        # Zoom level mapping based on coordinate span
+        if max_span > 2.0:      # Very large area (multiple cities)
+            return 8
+        elif max_span > 1.0:    # Large area (city-wide)
+            return 9
+        elif max_span > 0.5:    # Medium area (multiple neighborhoods)
+            return 10
+        elif max_span > 0.2:    # Small area (neighborhood)
+            return 11
+        elif max_span > 0.1:    # Very small area (few blocks)
+            return 12
+        elif max_span > 0.05:   # Tiny area (single area)
+            return 13
+        else:                   # Extremely small area
+            return 14
+    
+    def _get_activity_bounds(self, activities_data: List[Dict]) -> Dict:
+        """Get the geographic bounds of all activities"""
+        all_lats = []
+        all_lons = []
+        
+        for activity in activities_data:
+            coords = activity.get('coordinates', [])
+            for coord in coords:
+                if len(coord) == 2:
+                    all_lats.append(coord[0])
+                    all_lons.append(coord[1])
+        
+        if not all_lats or not all_lons:
+            return None
+        
+        return {
+            'min_lat': min(all_lats),
+            'max_lat': max(all_lats),
+            'min_lon': min(all_lons),
+            'max_lon': max(all_lons),
+            'center_lat': np.mean(all_lats),
+            'center_lon': np.mean(all_lons)
+        }
+    
     def create_basic_heatmap(self, activities_data: List[Dict], output_file: str = "basic_heatmap.html") -> folium.Map:
         """Create a basic heatmap from all activity coordinates"""
         print("Creating basic heatmap...")
         
-        # Calculate map center
-        center = self._calculate_map_center(activities_data)
+        # Calculate optimal center based on activity density
+        center = self._calculate_activity_density_center(activities_data)
+        zoom = self._calculate_optimal_zoom(activities_data)
+        bounds = self._get_activity_bounds(activities_data)
+        
+        print(f"Map center: [{center[0]:.4f}, {center[1]:.4f}]")
+        print(f"Optimal zoom level: {zoom}")
         
         # Create base map
         m = folium.Map(
             location=center,
-            zoom_start=self.default_zoom,
+            zoom_start=zoom,
             tiles='OpenStreetMap'
         )
         
@@ -66,9 +171,31 @@ class StravaHeatmapGenerator:
                 gradient={0.4: 'blue', 0.65: 'lime', 1: 'red'}
             ).add_to(m)
             
+            # If we have bounds, fit the map to show all activities
+            if bounds:
+                m.fit_bounds([
+                    [bounds['min_lat'], bounds['min_lon']],
+                    [bounds['max_lat'], bounds['max_lon']]
+                ], padding=(20, 20))
+            
             print(f"Added {len(heat_data)} GPS points to heatmap")
         else:
             print("No GPS data found for heatmap")
+        
+        # Add activity info to map
+        if bounds:
+            info_html = f'''
+            <div style="position: fixed; 
+                        top: 10px; right: 10px; width: 200px; height: 100px; 
+                        background-color: white; border:2px solid grey; z-index:9999; 
+                        font-size:12px; padding: 10px; border-radius: 10px;">
+            <h6><b>Activity Area</b></h6>
+            <p>Center: {center[0]:.4f}, {center[1]:.4f}</p>
+            <p>GPS Points: {len(heat_data):,}</p>
+            <p>Activities: {len(activities_data)}</p>
+            </div>
+            '''
+            m.get_root().html.add_child(folium.Element(info_html))
         
         # Save map
         m.save(output_file)
@@ -80,9 +207,13 @@ class StravaHeatmapGenerator:
         """Create a heatmap colored by speed"""
         print("Creating speed-based heatmap...")
         
-        center = self._calculate_map_center(activities_data)
-        m = folium.Map(location=center, zoom_start=self.default_zoom)
+        center = self._calculate_activity_density_center(activities_data)
+        zoom = self._calculate_optimal_zoom(activities_data)
+        bounds = self._get_activity_bounds(activities_data)
         
+        m = folium.Map(location=center, zoom_start=zoom)
+        
+        point_count = 0
         # Collect coordinates with speed data
         for activity in activities_data:
             coords = activity.get('coordinates', [])
@@ -114,13 +245,21 @@ class StravaHeatmapGenerator:
                                 fillOpacity=0.6,
                                 popup=f"Speed: {speed_kmh:.1f} km/h"
                             ).add_to(m)
+                            point_count += 1
+        
+        # Fit map to bounds if available
+        if bounds:
+            m.fit_bounds([
+                [bounds['min_lat'], bounds['min_lon']],
+                [bounds['max_lat'], bounds['max_lon']]
+            ], padding=(20, 20))
         
         # Add legend
         legend_html = '''
         <div style="position: fixed; 
                     bottom: 50px; left: 50px; width: 150px; height: 90px; 
                     background-color: white; border:2px solid grey; z-index:9999; 
-                    font-size:14px; padding: 10px">
+                    font-size:14px; padding: 10px; border-radius: 10px;">
         <p><b>Speed Legend</b></p>
         <p><i class="fa fa-circle" style="color:blue"></i> &lt; 15 km/h</p>
         <p><i class="fa fa-circle" style="color:green"></i> 15-25 km/h</p>
@@ -130,8 +269,23 @@ class StravaHeatmapGenerator:
         '''
         m.get_root().html.add_child(folium.Element(legend_html))
         
+        # Add info panel
+        if bounds:
+            info_html = f'''
+            <div style="position: fixed; 
+                        top: 10px; right: 10px; width: 180px; height: 80px; 
+                        background-color: white; border:2px solid grey; z-index:9999; 
+                        font-size:12px; padding: 10px; border-radius: 10px;">
+            <h6><b>Speed Map Info</b></h6>
+            <p>Speed Points: {point_count:,}</p>
+            <p>Activities: {len(activities_data)}</p>
+            </div>
+            '''
+            m.get_root().html.add_child(folium.Element(info_html))
+        
         m.save(output_file)
         print(f"Speed heatmap saved to {output_file}")
+        print(f"Added {point_count:,} speed-colored points")
         
         return m
     
@@ -139,8 +293,11 @@ class StravaHeatmapGenerator:
         """Create a heatmap colored by elevation"""
         print("Creating elevation-based heatmap...")
         
-        center = self._calculate_map_center(activities_data)
-        m = folium.Map(location=center, zoom_start=self.default_zoom)
+        center = self._calculate_activity_density_center(activities_data)
+        zoom = self._calculate_optimal_zoom(activities_data)
+        bounds = self._get_activity_bounds(activities_data)
+        
+        m = folium.Map(location=center, zoom_start=zoom)
         
         # Collect all elevations to determine color scale
         all_elevations = []
@@ -156,9 +313,12 @@ class StravaHeatmapGenerator:
         max_elevation = max(all_elevations)
         elevation_range = max_elevation - min_elevation
         
+        print(f"Elevation range: {min_elevation:.0f}m - {max_elevation:.0f}m")
+        
         # Create colormap
         colormap = cm.get_cmap('terrain')
         
+        point_count = 0
         for activity in activities_data:
             coords = activity.get('coordinates', [])
             elevations = activity.get('altitude', [])
@@ -186,23 +346,47 @@ class StravaHeatmapGenerator:
                                 fillOpacity=0.7,
                                 popup=f"Elevation: {elevation:.1f} m"
                             ).add_to(m)
+                            point_count += 1
+        
+        # Fit map to bounds if available
+        if bounds:
+            m.fit_bounds([
+                [bounds['min_lat'], bounds['min_lon']],
+                [bounds['max_lat'], bounds['max_lon']]
+            ], padding=(20, 20))
         
         # Add elevation legend
         legend_html = f'''
         <div style="position: fixed; 
                     bottom: 50px; left: 50px; width: 180px; height: 80px; 
                     background-color: white; border:2px solid grey; z-index:9999; 
-                    font-size:14px; padding: 10px">
+                    font-size:14px; padding: 10px; border-radius: 10px;">
         <p><b>Elevation Legend</b></p>
         <p>Min: {min_elevation:.0f} m</p>
         <p>Max: {max_elevation:.0f} m</p>
-        <div style="height: 20px; background: linear-gradient(to right, #8B4513, #228B22, #FFFF00, #FFFFFF);"></div>
+        <div style="height: 20px; background: linear-gradient(to right, #8B4513, #228B22, #FFFF00, #FFFFFF); border-radius: 5px;"></div>
         </div>
         '''
         m.get_root().html.add_child(folium.Element(legend_html))
         
+        # Add info panel
+        if bounds:
+            info_html = f'''
+            <div style="position: fixed; 
+                        top: 10px; right: 10px; width: 200px; height: 100px; 
+                        background-color: white; border:2px solid grey; z-index:9999; 
+                        font-size:12px; padding: 10px; border-radius: 10px;">
+            <h6><b>Elevation Map Info</b></h6>
+            <p>Elevation Points: {point_count:,}</p>
+            <p>Range: {elevation_range:.0f}m</p>
+            <p>Activities: {len(activities_data)}</p>
+            </div>
+            '''
+            m.get_root().html.add_child(folium.Element(info_html))
+        
         m.save(output_file)
         print(f"Elevation heatmap saved to {output_file}")
+        print(f"Added {point_count:,} elevation-colored points")
         
         return m
     
@@ -210,13 +394,19 @@ class StravaHeatmapGenerator:
         """Create a map showing individual routes"""
         print("Creating routes map...")
         
-        center = self._calculate_map_center(activities_data)
-        m = folium.Map(location=center, zoom_start=self.default_zoom)
+        center = self._calculate_activity_density_center(activities_data)
+        zoom = self._calculate_optimal_zoom(activities_data)
+        bounds = self._get_activity_bounds(activities_data)
+        
+        m = folium.Map(location=center, zoom_start=zoom)
         
         # Color palette for different routes
         colors = ['red', 'blue', 'green', 'purple', 'orange', 'darkred', 'lightred', 
                  'beige', 'darkblue', 'darkgreen', 'cadetblue', 'darkpurple', 'white', 
                  'pink', 'lightblue', 'lightgreen', 'gray', 'black', 'lightgray']
+        
+        route_count = 0
+        total_points = 0
         
         for i, activity in enumerate(activities_data[:20]):  # Limit to 20 routes for visibility
             coords = activity.get('coordinates', [])
@@ -235,9 +425,35 @@ class StravaHeatmapGenerator:
                         opacity=0.7,
                         popup=f"Route {i+1} (Activity ID: {activity.get('id', 'Unknown')})"
                     ).add_to(m)
+                    
+                    route_count += 1
+                    total_points += len(route_coords)
+        
+        # Fit map to bounds if available
+        if bounds:
+            m.fit_bounds([
+                [bounds['min_lat'], bounds['min_lon']],
+                [bounds['max_lat'], bounds['max_lon']]
+            ], padding=(20, 20))
+        
+        # Add info panel
+        if bounds:
+            info_html = f'''
+            <div style="position: fixed; 
+                        top: 10px; right: 10px; width: 180px; height: 100px; 
+                        background-color: white; border:2px solid grey; z-index:9999; 
+                        font-size:12px; padding: 10px; border-radius: 10px;">
+            <h6><b>Routes Map Info</b></h6>
+            <p>Routes Shown: {route_count}</p>
+            <p>Total Points: {total_points:,}</p>
+            <p>Available: {len(activities_data)}</p>
+            </div>
+            '''
+            m.get_root().html.add_child(folium.Element(info_html))
         
         m.save(output_file)
         print(f"Routes map saved to {output_file}")
+        print(f"Added {route_count} routes with {total_points:,} total points")
         
         return m
     
