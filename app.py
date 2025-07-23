@@ -9,6 +9,7 @@ from datetime import datetime
 
 from src.strava_api import StravaAPI
 from src.heatmap_generator import StravaHeatmapGenerator
+from src.analytics import StravaAnalytics
 
 # Load environment variables
 load_dotenv()
@@ -19,6 +20,7 @@ app.secret_key = os.getenv('FLASK_SECRET_KEY', 'your-secret-key-here')
 # Initialize global variables
 strava_api = None
 heatmap_generator = StravaHeatmapGenerator()
+analytics = StravaAnalytics()
 
 
 def initialize_strava_api():
@@ -154,10 +156,31 @@ def generate_heatmaps():
             heatmap_generator.create_route_map(detailed_activities, 'maps/routes_map.html')
             generated_files['routes'] = 'routes_map.html'
         
-        # Generate statistics chart
+        # New advanced visualizations
+        if 'animated' in map_types and detailed_activities:
+            heatmap_generator.create_time_animated_heatmap(detailed_activities, 'maps/animated_heatmap.html')
+            generated_files['animated'] = 'animated_heatmap.html'
+        
+        if 'clustered' in map_types and detailed_activities:
+            heatmap_generator.create_clustered_activity_map(detailed_activities, 'maps/clustered_map.html')
+            generated_files['clustered'] = 'clustered_map.html'
+        
+        if 'explorer' in map_types and detailed_activities:
+            heatmap_generator.create_interactive_route_explorer(detailed_activities, 'maps/route_explorer.html')
+            generated_files['explorer'] = 'route_explorer.html'
+        
+        if 'comparison' in map_types and detailed_activities:
+            heatmap_generator.create_comparison_heatmap(detailed_activities, 'maps/comparison_heatmap.html', 'speed')
+            generated_files['comparison'] = 'comparison_heatmap.html'
+        
+        # Generate statistics chart and dashboard
         if not activities_df.empty:
             heatmap_generator.create_activity_stats_chart(activities_df, 'maps/activity_stats.png')
             generated_files['stats'] = 'activity_stats.png'
+            
+            # Generate comprehensive analytics dashboard
+            analytics.create_comprehensive_dashboard(activities_df, 'maps/analytics_dashboard.png')
+            generated_files['dashboard'] = 'analytics_dashboard.png'
         
         return jsonify({
             'success': True,
@@ -165,6 +188,51 @@ def generate_heatmaps():
                 'generated_files': generated_files,
                 'activities_processed': len(detailed_activities),
                 'total_activities': len(activities_df) if not activities_df.empty else 0
+            }
+        })
+        
+    except Exception as e:
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+
+@app.route('/api/clear-cache', methods=['POST'])
+def clear_cache():
+    """Clear API cache"""
+    try:
+        if strava_api:
+            strava_api.clear_cache()
+            return jsonify({'success': True, 'message': 'Cache cleared successfully'})
+        else:
+            return jsonify({'success': False, 'error': 'Strava API not initialized'}), 400
+    except Exception as e:
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+
+@app.route('/api/activity-insights')
+def get_activity_insights():
+    """Get insights and statistics about activities"""
+    try:
+        if not strava_api:
+            initialize_strava_api()
+        
+        days_back = request.args.get('days', 365, type=int)
+        activities_df = strava_api.get_all_cycling_activities(days_back=days_back)
+        
+        if activities_df.empty:
+            return jsonify({
+                'success': True,
+                'data': {'insights': [], 'summary': 'No activities found'}
+            })
+        
+        # Use the enhanced analytics module
+        report = analytics.generate_activity_report(activities_df)
+        
+        return jsonify({
+            'success': True,
+            'data': {
+                'insights': report.get('insights', []),
+                'summary': report.get('summary', ''),
+                'detailed_analysis': report.get('detailed_analysis', {})
             }
         })
         

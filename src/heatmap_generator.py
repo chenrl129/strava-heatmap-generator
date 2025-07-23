@@ -3,20 +3,43 @@ Heatmap generator for Strava activity data
 """
 import os
 import folium
-from folium.plugins import HeatMap, HeatMapWithTime
+from folium.plugins import HeatMap, HeatMapWithTime, MarkerCluster, MiniMap
 import numpy as np
 import pandas as pd
 from typing import List, Dict, Tuple, Optional
 import matplotlib.pyplot as plt
 import matplotlib.cm as cm
-from datetime import datetime
+from datetime import datetime, timedelta
 import json
+import seaborn as sns
+from geopy.distance import geodesic
+from collections import defaultdict
+from .advanced_visualizations import AdvancedVisualizationMixin
 
 
-class StravaHeatmapGenerator:
+class StravaHeatmapGenerator(AdvancedVisualizationMixin):
     def __init__(self):
         self.default_center = [40.7128, -74.0060]  # Default to NYC
         self.default_zoom = 12
+        
+        # Set style for matplotlib plots
+        plt.style.use('seaborn-v0_8' if 'seaborn-v0_8' in plt.style.available else 'default')
+        
+        # Color schemes for different map types
+        self.color_schemes = {
+            'speed': {
+                'low': '#2E86AB',      # Blue for slow
+                'medium': '#A23B72',   # Purple for medium
+                'high': '#F18F01',     # Orange for fast
+                'extreme': '#C73E1D'   # Red for very fast
+            },
+            'elevation': {
+                'low': '#6A994E',      # Green for low elevation
+                'medium': '#BC6C25',   # Brown for medium
+                'high': '#8B5A3C',     # Dark brown for high
+                'extreme': '#FFFFFF'   # White for peaks
+            }
+        }
     
     def _calculate_map_center(self, activities_data: List[Dict]) -> Tuple[float, float]:
         """Calculate the center point of all activities"""
@@ -72,6 +95,62 @@ class StravaHeatmapGenerator:
         center_lon = (lon_bins[max_density_idx[1]] + lon_bins[max_density_idx[1] + 1]) / 2
         
         return [center_lat, center_lon]
+    
+    def _sample_coordinates(self, coordinates: List[List[float]], max_points: int = 1000) -> List[List[float]]:
+        """Sample coordinates to reduce density for better performance"""
+        if len(coordinates) <= max_points:
+            return coordinates
+        
+        # Use uniform sampling to maintain route shape
+        step = len(coordinates) // max_points
+        return coordinates[::step]
+    
+    def _calculate_route_statistics(self, activity_data: Dict) -> Dict:
+        """Calculate statistics for a route"""
+        coords = activity_data.get('coordinates', [])
+        velocity = activity_data.get('velocity', [])
+        altitude = activity_data.get('altitude', [])
+        
+        stats = {
+            'total_points': len(coords),
+            'distance_km': 0.0,
+            'avg_speed_kmh': 0.0,
+            'max_speed_kmh': 0.0,
+            'elevation_gain_m': 0.0,
+            'max_elevation_m': 0.0
+        }
+        
+        if len(coords) < 2:
+            return stats
+        
+        # Calculate total distance
+        total_distance = 0
+        for i in range(1, len(coords)):
+            dist = geodesic(coords[i-1], coords[i]).meters
+            total_distance += dist
+        stats['distance_km'] = total_distance / 1000
+        
+        # Speed statistics
+        if velocity:
+            speeds_kmh = [v * 3.6 for v in velocity if v > 0]  # Convert m/s to km/h
+            if speeds_kmh:
+                stats['avg_speed_kmh'] = np.mean(speeds_kmh)
+                stats['max_speed_kmh'] = max(speeds_kmh)
+        
+        # Elevation statistics
+        if altitude:
+            valid_altitudes = [alt for alt in altitude if alt is not None]
+            if valid_altitudes:
+                stats['max_elevation_m'] = max(valid_altitudes)
+                # Calculate elevation gain
+                elevation_gain = 0
+                for i in range(1, len(valid_altitudes)):
+                    diff = valid_altitudes[i] - valid_altitudes[i-1]
+                    if diff > 0:
+                        elevation_gain += diff
+                stats['elevation_gain_m'] = elevation_gain
+        
+        return stats
     
     def _calculate_optimal_zoom(self, activities_data: List[Dict]) -> int:
         """Calculate optimal zoom level based on activity spread"""
